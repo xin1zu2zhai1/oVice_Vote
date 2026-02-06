@@ -5,98 +5,91 @@
     <title>oVice CSV Poll Plugin</title>
     <script src="https://cdn.jsdelivr.net/npm/@ovice/plugin-sdk@latest/dist/index.min.js"></script>
     <style>
-        body { font-family: sans-serif; padding: 10px; background: #fff; border-radius: 8px; }
-        h3 { font-size: 16px; margin-top: 0; color: #333; }
+        body { font-family: 'Helvetica Neue', Arial, sans-serif; padding: 12px; background: #fff; color: #333; }
+        .poll-card { border: 1px solid #eee; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+        h3 { font-size: 18px; margin: 0 0 15px 0; color: #1a1a1a; border-left: 4px solid #0096ff; padding-left: 10px; }
         .option-btn {
-            display: block; width: 100%; padding: 8px; margin: 5px 0;
-            background: #f0f0f0; border: 1px solid #ccc; border-radius: 4px;
-            cursor: pointer; text-align: left; position: relative;
+            display: block; width: 100%; padding: 12px; margin: 8px 0;
+            background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px;
+            cursor: pointer; text-align: left; position: relative; overflow: hidden;
+            transition: transform 0.1s;
         }
-        .option-btn:hover { background: #e0e0e0; }
+        .option-btn:active { transform: scale(0.98); }
         .bar {
             position: absolute; left: 0; top: 0; bottom: 0;
-            background: rgba(0, 150, 255, 0.2); pointer-events: none;
+            background: rgba(0, 150, 255, 0.15); transition: width 0.5s ease-out;
         }
-        .count { float: right; font-weight: bold; }
-        .admin-section { margin-top: 15px; border-top: 1px solid #eee; pt: 10px; font-size: 12px; }
-        textarea { width: 100%; height: 60px; font-size: 11px; }
-        .hidden { display: none; }
+        .label-text { position: relative; z-index: 1; font-weight: 500; }
+        .count { float: right; position: relative; z-index: 1; font-weight: bold; color: #0076cc; }
+        .status { font-size: 11px; color: #999; margin-top: 10px; text-align: center; }
     </style>
 </head>
 <body>
 
-<div id="poll-container">
-    <h3 id="poll-title">アンケート（CSVを読み込んでください）</h3>
+<div class="poll-card">
+    <h3 id="poll-title">読み込み中...</h3>
     <div id="options"></div>
-</div>
-
-<div class="admin-section" id="admin-panel">
-    <p>【管理者設定】CSVを貼り付けて更新</p>
-    <textarea id="csv-input" placeholder="タイトル,質問文&#10;選択肢,回答1&#10;選択肢,回答2"></textarea>
-    <button onclick="updatePollFromCSV()">アンケートを更新</button>
+    <div id="status" class="status"></div>
 </div>
 
 <script>
     let ovice = null;
-    let pollData = { title: "", options: {}, votes: {} };
+    let pollData = { title: "", options: [], votes: {} };
 
-    // SDKの初期化
     window.addEventListener('load', async () => {
+        // 1. SDKの初期化
         ovice = await window.OvicePluginSDK.init();
-        
-        // 既存の投票データの読み込み
+
+        // 2. CSVの読み込みを試行
+        await loadCsvAndSync();
+
+        // 3. 他のユーザーが投票した際のリアルタイム更新
         ovice.onStorageChanged((key, value) => {
-            if (key === 'poll_state') {
-                pollData = value;
+            if (key === 'poll_votes') {
+                pollData.votes = value;
                 renderPoll();
             }
         });
 
-        // 初回表示
-        const saved = await ovice.getStorage('poll_state');
-        if (saved) {
-            pollData = saved;
+        // 4. 保存されている既存の投票数を取得
+        const savedVotes = await ovice.getStorage('poll_votes');
+        if (savedVotes) {
+            pollData.votes = savedVotes;
             renderPoll();
         }
     });
 
-    // CSVのパースと更新
-    async function updatePollFromCSV() {
-        const csvText = document.getElementById('csv-input').value;
-        const lines = csvText.split('\n');
-        let newTitle = "アンケート";
-        let newOptions = [];
+    async function loadCsvAndSync() {
+        try {
+            const response = await fetch('vote.csv');
+            if (!response.ok) throw new Error('CSV file not found');
+            
+            const text = await response.textContent || await response.text();
+            const lines = text.split(/\r?\n/).filter(line => line.trim() !== "");
+            
+            if (lines.length < 2) return;
 
-        lines.forEach(line => {
-            const [type, value] = line.split(',').map(s => s.trim());
-            if (type === 'タイトル') newTitle = value;
-            if (type === '選択肢') newOptions.push(value);
-        });
+            pollData.title = lines[0]; // 1行目がタイトル
+            pollData.options = lines.slice(1); // 2行目以降が選択肢
 
-        if (newOptions.length === 0) return alert("選択肢が見つかりません");
-
-        // 状態をリセットして保存
-        const newState = {
-            title: newTitle,
-            options: newOptions,
-            votes: newOptions.reduce((acc, opt) => ({ ...acc, [opt]: 0 }), {})
-        };
-
-        await ovice.setStorage('poll_state', newState);
-        pollData = newState;
-        renderPoll();
+            renderPoll();
+            document.getElementById('status').innerText = "CSV loaded successfully";
+        } catch (err) {
+            document.getElementById('poll-title').innerText = "CSV読み込みエラー";
+            document.getElementById('status').innerText = "vote.csvが見つかりません";
+            console.error(err);
+        }
     }
 
-    // 投票処理
     async function vote(option) {
+        // 現在の投票数を更新（誰かが投票するたびにストレージを更新）
         pollData.votes[option] = (pollData.votes[option] || 0) + 1;
-        await ovice.setStorage('poll_state', pollData);
+        await ovice.setStorage('poll_votes', pollData.votes);
         renderPoll();
     }
 
-    // 画面の描画
     function renderPoll() {
-        document.getElementById('poll-title').innerText = pollData.title || "アンケート";
+        document.getElementById('poll-title').innerText = pollData.title;
         const container = document.getElementById('options');
         container.innerHTML = '';
 
@@ -110,7 +103,7 @@
             btn.className = 'option-btn';
             btn.innerHTML = `
                 <div class="bar" style="width: ${percent}%"></div>
-                <span>${opt}</span>
+                <span class="label-text">${opt}</span>
                 <span class="count">${count}</span>
             `;
             btn.onclick = () => vote(opt);
