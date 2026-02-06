@@ -2,12 +2,12 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>oVice CSV Poll (Admin Check Fix)</title>
+    <title>oVice CSV Poll (Final Debug)</title>
     <script src="https://unpkg.com/@ovice/plugin-sdk@0.2.1/dist/index.min.js"></script>
     <style>
         body { font-family: sans-serif; padding: 12px; background: #fff; }
         .poll-card { border: 1px solid #eee; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-        h3 { font-size: 18px; margin: 0 0 15px 0; border-left: 4px solid #0096ff; padding-left: 10px; cursor: pointer; }
+        h3 { font-size: 18px; margin: 0 0 15px 0; border-left: 4px solid #0096ff; padding-left: 10px; }
         .option-btn {
             display: block; width: 100%; padding: 12px; margin: 8px 0;
             background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px;
@@ -19,67 +19,76 @@
         
         /* 管理者パネル */
         #admin-panel {
-            margin-top: 20px; padding: 10px; border: 1px dashed #d32f2f; border-radius: 8px;
-            background: #fff9f9; display: none; /* デフォルト非表示 */
+            margin-top: 20px; padding: 10px; border: 2px solid #ff4444; border-radius: 8px;
+            background: #fff9f9; display: none;
         }
         .admin-label { font-size: 11px; font-weight: bold; color: #d32f2f; display: block; margin-bottom: 5px; }
+        
+        /* デバッグ情報エリア */
+        #debug-info {
+            margin-top: 30px; font-size: 9px; color: #aaa; background: #fdfdfd; 
+            padding: 5px; border-top: 1px solid #eee; cursor: help;
+        }
     </style>
 </head>
 <body>
 
 <div class="poll-card">
-    <h3 id="poll-title" onclick="debugClick()">アンケート</h3>
+    <h3 id="poll-title">アンケート</h3>
     <div id="options"></div>
 
     <div id="admin-panel">
-        <span class="admin-label">管理者メニュー: CSVアップロード</span>
+        <span class="admin-label">⚠️ 管理者メニュー</span>
         <input type="file" id="csv-file" accept=".csv">
-        <button onclick="resetVotes()" style="margin-top:10px; font-size:10px;">投票をリセット</button>
+        <button onclick="resetVotes()" style="margin-top:10px;">投票リセット</button>
+    </div>
+
+    <div id="debug-info" onclick="forceAdmin()">
+        [Debug Mode: Data will appear here]
     </div>
 </div>
 
 <script>
     let ovice = null;
-    let pollState = { title: "CSVをアップロードしてください", options: [], votes: {} };
-    let clickCount = 0;
+    let pollState = { title: "CSVを読み込んでください", options: [], votes: {} };
 
-    // 隠し機能：タイトルを5回クリックすると強制的に管理者パネルを出す（テスト用）
-    function debugClick() {
-        clickCount++;
-        if (clickCount >= 5) {
-            document.getElementById('admin-panel').style.display = 'block';
-            alert("Debug: Admin panel forced visible");
-        }
+    function forceAdmin() {
+        document.getElementById('admin-panel').style.display = 'block';
+        alert("管理者パネルを強制表示しました。");
     }
 
     async function init() {
         const SDK = window.OvicePluginSDK || (window.ovice ? window.ovice.OvicePluginSDK : null);
-        if (!SDK) return;
+        if (!SDK) {
+            document.getElementById('debug-info').innerText = "SDKが見つかりません。oVice内で開いてください。";
+            return;
+        }
 
         try {
             ovice = await SDK.init();
-            
-            // --- 権限チェックの強化版 ---
             const user = await ovice.getUserInfo();
-            console.log("User Info:", user);
+            
+            // デバッグ情報を画面に表示（何が返ってきているか確認）
+            document.getElementById('debug-info').innerText = "Your Info: " + JSON.stringify(user);
 
-            // oViceの権限判定: 
-            // 1. role が 'owner' か 'admin' である
-            // 2. あるいは permission が 0 (管理者権限) である
-            const isAdmin = user.role === 'owner' || 
-                            user.role === 'admin' || 
-                            user.permission === 0 || 
-                            user.permission === '0';
+            // 判定条件を大幅に拡張
+            const roleStr = String(user.role || "").toLowerCase();
+            const permStr = String(user.permission || "");
+            
+            const isAdmin = 
+                roleStr.includes("admin") || 
+                roleStr.includes("owner") || 
+                roleStr.includes("manager") ||
+                permStr === "0" || 
+                permStr === "1"; // 0や1が管理者権限であることが多いため
 
             if (isAdmin) {
                 document.getElementById('admin-panel').style.display = 'block';
             }
 
-            // ストレージ読み込み
+            // データ同期
             const savedState = await ovice.getStorage('poll_state');
-            if (savedState) {
-                pollState = savedState;
-            }
+            if (savedState) pollState = savedState;
 
             ovice.onStorageChanged((key, value) => {
                 if (key === 'poll_state') {
@@ -91,19 +100,17 @@
             document.getElementById('csv-file').addEventListener('change', handleFileUpload);
             renderPoll();
         } catch (e) {
-            console.error("Init Error:", e);
+            document.getElementById('debug-info').innerText = "Error: " + e.message;
         }
     }
 
     async function handleFileUpload(event) {
         const file = event.target.files[0];
         if (!file) return;
-
         const reader = new FileReader();
         reader.onload = async (e) => {
             const text = e.target.result;
             const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l !== "");
-            
             if (lines.length > 0) {
                 const newOptions = lines.slice(1);
                 pollState = {
@@ -119,7 +126,7 @@
     }
 
     async function resetVotes() {
-        if(!confirm("投票数をゼロに戻しますか？")) return;
+        if(!confirm("リセットしますか？")) return;
         pollState.options.forEach(opt => pollState.votes[opt] = 0);
         await ovice.setStorage('poll_state', pollState);
         renderPoll();
@@ -135,20 +142,13 @@
         document.getElementById('poll-title').innerText = pollState.title;
         const container = document.getElementById('options');
         container.innerHTML = '';
-
         const totalVotes = Object.values(pollState.votes).reduce((a, b) => a + b, 0);
-
         pollState.options.forEach(opt => {
             const count = pollState.votes[opt] || 0;
             const percent = totalVotes === 0 ? 0 : (count / totalVotes) * 100;
-
             const btn = document.createElement('button');
             btn.className = 'option-btn';
-            btn.innerHTML = `
-                <div class="bar" style="width: ${percent}%"></div>
-                <span class="label-text">${opt}</span>
-                <span class="count">${count}</span>
-            `;
+            btn.innerHTML = `<div class="bar" style="width:${percent}%"></div><span class="label-text">${opt}</span><span class="count">${count}</span>`;
             btn.onclick = () => vote(opt);
             container.appendChild(btn);
         });
