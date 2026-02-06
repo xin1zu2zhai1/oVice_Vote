@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>oVice CSV Poll Plugin</title>
+    <script src="https://cdn.jsdelivr.net/npm/@ovice/plugin-sdk@latest/dist/index.min.js"></script>
+    <style>
+        body { font-family: sans-serif; padding: 10px; background: #fff; border-radius: 8px; }
+        h3 { font-size: 16px; margin-top: 0; color: #333; }
+        .option-btn {
+            display: block; width: 100%; padding: 8px; margin: 5px 0;
+            background: #f0f0f0; border: 1px solid #ccc; border-radius: 4px;
+            cursor: pointer; text-align: left; position: relative;
+        }
+        .option-btn:hover { background: #e0e0e0; }
+        .bar {
+            position: absolute; left: 0; top: 0; bottom: 0;
+            background: rgba(0, 150, 255, 0.2); pointer-events: none;
+        }
+        .count { float: right; font-weight: bold; }
+        .admin-section { margin-top: 15px; border-top: 1px solid #eee; pt: 10px; font-size: 12px; }
+        textarea { width: 100%; height: 60px; font-size: 11px; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+
+<div id="poll-container">
+    <h3 id="poll-title">アンケート（CSVを読み込んでください）</h3>
+    <div id="options"></div>
+</div>
+
+<div class="admin-section" id="admin-panel">
+    <p>【管理者設定】CSVを貼り付けて更新</p>
+    <textarea id="csv-input" placeholder="タイトル,質問文&#10;選択肢,回答1&#10;選択肢,回答2"></textarea>
+    <button onclick="updatePollFromCSV()">アンケートを更新</button>
+</div>
+
+<script>
+    let ovice = null;
+    let pollData = { title: "", options: {}, votes: {} };
+
+    // SDKの初期化
+    window.addEventListener('load', async () => {
+        ovice = await window.OvicePluginSDK.init();
+        
+        // 既存の投票データの読み込み
+        ovice.onStorageChanged((key, value) => {
+            if (key === 'poll_state') {
+                pollData = value;
+                renderPoll();
+            }
+        });
+
+        // 初回表示
+        const saved = await ovice.getStorage('poll_state');
+        if (saved) {
+            pollData = saved;
+            renderPoll();
+        }
+    });
+
+    // CSVのパースと更新
+    async function updatePollFromCSV() {
+        const csvText = document.getElementById('csv-input').value;
+        const lines = csvText.split('\n');
+        let newTitle = "アンケート";
+        let newOptions = [];
+
+        lines.forEach(line => {
+            const [type, value] = line.split(',').map(s => s.trim());
+            if (type === 'タイトル') newTitle = value;
+            if (type === '選択肢') newOptions.push(value);
+        });
+
+        if (newOptions.length === 0) return alert("選択肢が見つかりません");
+
+        // 状態をリセットして保存
+        const newState = {
+            title: newTitle,
+            options: newOptions,
+            votes: newOptions.reduce((acc, opt) => ({ ...acc, [opt]: 0 }), {})
+        };
+
+        await ovice.setStorage('poll_state', newState);
+        pollData = newState;
+        renderPoll();
+    }
+
+    // 投票処理
+    async function vote(option) {
+        pollData.votes[option] = (pollData.votes[option] || 0) + 1;
+        await ovice.setStorage('poll_state', pollData);
+        renderPoll();
+    }
+
+    // 画面の描画
+    function renderPoll() {
+        document.getElementById('poll-title').innerText = pollData.title || "アンケート";
+        const container = document.getElementById('options');
+        container.innerHTML = '';
+
+        const totalVotes = Object.values(pollData.votes).reduce((a, b) => a + b, 0);
+
+        pollData.options.forEach(opt => {
+            const count = pollData.votes[opt] || 0;
+            const percent = totalVotes === 0 ? 0 : (count / totalVotes) * 100;
+
+            const btn = document.createElement('button');
+            btn.className = 'option-btn';
+            btn.innerHTML = `
+                <div class="bar" style="width: ${percent}%"></div>
+                <span>${opt}</span>
+                <span class="count">${count}</span>
+            `;
+            btn.onclick = () => vote(opt);
+            container.appendChild(btn);
+        });
+    }
+</script>
+</body>
+</html>
