@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>oVice CSV Poll</title>
-    <script src="https://cdn.jsdelivr.net/npm/@ovice/plugin-sdk@latest/dist/index.min.js"></script>
+    <script src="https://unpkg.com/@ovice/plugin-sdk@0.2.1/dist/index.min.js"></script>
     <style>
         body { font-family: sans-serif; padding: 12px; background: #fff; }
         .poll-card { border: 1px solid #eee; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
@@ -16,51 +16,53 @@
         .bar { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(0, 150, 255, 0.15); transition: width 0.5s; }
         .label-text { position: relative; z-index: 1; }
         .count { float: right; position: relative; z-index: 1; font-weight: bold; }
-        .debug-info { font-size: 10px; color: #ccc; margin-top: 10px; }
+        .debug-info { font-size: 10px; color: #e0e0e0; margin-top: 20px; border-top: 1px solid #f5f5f5; padding-top: 5px; }
     </style>
 </head>
 <body>
 
 <div class="poll-card">
-    <h3 id="poll-title">初期化中...</h3>
+    <h3 id="poll-title">読み込み中...</h3>
     <div id="options"></div>
     <div id="debug" class="debug-info"></div>
 </div>
 
 <script>
     let ovice = null;
-    let pollData = { title: "", options: [], votes: {} };
+    let pollData = { title: "アンケート", options: [], votes: {} };
 
-    // デバッグログ表示用
     function log(msg) {
         console.log(msg);
         document.getElementById('debug').innerText += msg + "\n";
     }
 
     async function init() {
-        log("Checking SDK...");
-        if (!window.OvicePluginSDK) {
-            log("Error: SDK not found.");
+        log("Checking for SDK...");
+        
+        // SDKが存在するかチェック（window.OvicePluginSDK または window.ovice）
+        const SDK = window.OvicePluginSDK || (window.ovice ? window.ovice.OvicePluginSDK : null);
+
+        if (!SDK) {
+            log("SDK not found in window object.");
+            // SDKがなくても表示だけは進める
+            await loadCsv();
+            renderPoll();
             return;
         }
 
         try {
             log("Initializing SDK...");
-            // oVice環境以外でも動作するようにタイムアウト等を考慮
-            ovice = await window.OvicePluginSDK.init();
-            log("SDK initialized.");
+            ovice = await SDK.init();
+            log("SDK success.");
 
-            // 1. CSVの読み込み
             await loadCsv();
 
-            // 2. 既存の投票データを取得
+            // データの同期設定
             const savedVotes = await ovice.getStorage('poll_votes');
             if (savedVotes) {
                 pollData.votes = savedVotes;
-                log("Data synced.");
             }
 
-            // 3. リアルタイム更新の監視
             ovice.onStorageChanged((key, value) => {
                 if (key === 'poll_votes') {
                     pollData.votes = value;
@@ -70,8 +72,7 @@
 
             renderPoll();
         } catch (e) {
-            log("Error during init: " + e.message);
-            // oVice環境外（ローカルテスト等）でも表示だけはさせる
+            log("Init error: " + e.message);
             await loadCsv();
             renderPoll();
         }
@@ -80,32 +81,37 @@
     async function loadCsv() {
         log("Fetching vote.csv...");
         try {
-            const response = await fetch('vote.csv?t=' + new Date().getTime()); // キャッシュ回避
-            if (!response.ok) throw new Error('HTTP Error: ' + response.status);
+            const response = await fetch('vote.csv?t=' + Date.now());
+            if (!response.ok) throw new Error('HTTP ' + response.status);
             
             const text = await response.text();
-            const lines = text.split(/\r?\n/).filter(line => line.trim() !== "");
+            const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l !== "");
             
             if (lines.length > 0) {
                 pollData.title = lines[0];
                 pollData.options = lines.slice(1);
+                // 選択肢が変わった場合のために初期化
+                pollData.options.forEach(opt => {
+                    if (!(opt in pollData.votes)) pollData.votes[opt] = 0;
+                });
                 log("CSV loaded: " + pollData.title);
             }
         } catch (err) {
-            log("CSV Load Error: " + err.message);
-            pollData.title = "CSV読み込みエラー";
+            log("CSV Error: " + err.message);
+            pollData.title = "vote.csvを読み込めませんでした";
         }
     }
 
     async function vote(option) {
-        if (!ovice) return;
         pollData.votes[option] = (pollData.votes[option] || 0) + 1;
-        await ovice.setStorage('poll_votes', pollData.votes);
+        if (ovice) {
+            await ovice.setStorage('poll_votes', pollData.votes);
+        }
         renderPoll();
     }
 
     function renderPoll() {
-        document.getElementById('poll-title').innerText = pollData.title || "アンケート";
+        document.getElementById('poll-title').innerText = pollData.title;
         const container = document.getElementById('options');
         container.innerHTML = '';
 
@@ -127,6 +133,7 @@
         });
     }
 
+    // 実行
     init();
 </script>
 </body>
