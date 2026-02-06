@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>oVice Poll Sync Fix</title>
+    <title>oVice Poll Sync Final</title>
     <style>
         body { font-family: sans-serif; padding: 12px; background: #fff; margin: 0; }
         .poll-card { border: 1px solid #eee; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
@@ -13,116 +13,121 @@
             cursor: pointer; text-align: left; position: relative; overflow: hidden;
             user-select: none;
         }
-        .option-btn:active { opacity: 0.6; }
         .bar { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(0, 150, 255, 0.15); transition: width 0.4s; }
         .label-text { position: relative; z-index: 1; }
         .count { float: right; position: relative; z-index: 1; font-weight: bold; color: #0076cc; }
-        .status { font-size: 9px; color: #bbb; text-align: center; margin-top: 8px; }
+        .status { font-size: 9px; color: #ddd; text-align: right; margin-top: 10px; }
     </style>
 </head>
 <body>
 
 <div class="poll-card">
-    <h3 id="poll-title">CSV Loading...</h3>
+    <h3 id="poll-title">Loading...</h3>
     <div id="options"></div>
-    <div id="sync-info" class="status">Sync: Waiting for oVice...</div>
+    <div id="sync-status" class="status">Connecting to oVice...</div>
 </div>
 
 <script>
-/** * oVice 通信プロトコル 最終調整版
+/** * oVice Shared Protocol V3 (公式SDKの通信を完全シミュレート)
  */
-const OviceBridge = (() => {
+const OviceApp = (() => {
     let _onUpdate = null;
-    let _callbackId = 0;
-    const _pending = {};
+    let _callIdx = 0;
+    const _waiting = {};
 
-    window.addEventListener('message', e => {
-        if (!e.data) return;
-        // 1. 同期更新を受け取る
-        if (e.data.type === 'storage' || e.data.event === 'storageChanged') {
-            if (_onUpdate) _onUpdate(e.data.key, e.data.value);
+    window.addEventListener('message', (e) => {
+        const d = e.data;
+        if (!d) return;
+
+        // A. 共有ストレージが更新された通知
+        if (d.type === 'storage' || d.event === 'storageChanged') {
+            if (_onUpdate) _onUpdate(d.key, d.value);
         }
-        // 2. getStorageなどの返信を受け取る
-        if (e.data.callbackId && _pending[e.data.callbackId]) {
-            _pending[e.data.callbackId](e.data.value);
-            delete _pending[e.data.callbackId];
+
+        // B. getStorageなどのリクエストに対する返信
+        if (d.callbackId && _waiting[d.callbackId]) {
+            _waiting[d.callbackId](d.value);
+            delete _waiting[d.callbackId];
         }
     });
 
-    const send = (type, payload = {}) => {
-        const callbackId = ++_callbackId;
+    const call = (type, params = {}) => {
+        const callbackId = `poll_${Date.now()}_${++_callIdx}`;
         return new Promise(resolve => {
-            _pending[callbackId] = resolve;
-            window.parent.postMessage({ type, callbackId, ...payload }, '*');
+            _waiting[callbackId] = resolve;
+            window.parent.postMessage({ type, callbackId, ...params }, '*');
         });
     };
 
     return {
-        init: () => send('init'),
-        get: (key) => send('get_storage', { key }),
-        set: (key, value) => window.parent.postMessage({ type: 'set_storage', key, value }, '*'),
-        onChange: (cb) => { _onUpdate = cb; }
+        connect: () => call('init'),
+        fetch: (key) => call('get_storage', { key }),
+        update: (key, value) => window.parent.postMessage({ type: 'set_storage', key, value }, '*'),
+        onSync: (cb) => { _onUpdate = cb; }
     };
 })();
 
-let pollData = { title: "", options: [], votes: {} };
-const KEY = 'shared_poll_state';
+let pollState = { title: "", options: [], votes: {} };
+const SHARED_KEY = 'poll_shared_v3';
 
-async function start() {
+async function main() {
     try {
-        await OviceBridge.init();
-        document.getElementById('sync-info').innerText = "Sync: Connected";
+        await OviceApp.connect();
+        document.getElementById('sync-status').innerText = "Status: Online";
 
-        // CSV読み込み
+        // 1. CSV読み込み (構造だけ作成)
         await loadCsv();
 
-        // 共有データの取得
-        const saved = await OviceBridge.get(KEY);
-        if (saved) {
-            pollData.votes = typeof saved === 'string' ? JSON.parse(saved) : saved;
-            render();
+        // 2. 他の人と共有されている最新の票を取得
+        const cloudVotes = await OviceApp.fetch(SHARED_KEY);
+        if (cloudVotes) {
+            pollState.votes = typeof cloudVotes === 'string' ? JSON.parse(cloudVotes) : cloudVotes;
         }
+        render();
 
-        // 同期リスナー
-        OviceBridge.onChange((key, val) => {
-            if (key === KEY) {
-                pollData.votes = typeof val === 'string' ? JSON.parse(val) : val;
+        // 3. 誰かがクリックした時の同期を待機
+        OviceApp.onSync((key, val) => {
+            if (key === SHARED_KEY) {
+                pollState.votes = typeof val === 'string' ? JSON.parse(val) : val;
                 render();
-                document.getElementById('sync-info').innerText = "Sync: Updated " + new Date().toLocaleTimeString();
+                document.getElementById('sync-status').innerText = "Last Update: " + new Date().toLocaleTimeString();
             }
         });
 
     } catch (e) {
-        document.getElementById('sync-info').innerText = "Sync Error: " + e.message;
+        document.getElementById('sync-status').innerText = "Connection Failed";
     }
 }
 
 async function loadCsv() {
-    const res = await fetch('vote.csv?v=' + Date.now());
+    const res = await fetch('vote.csv?t=' + Date.now());
     const text = await res.text();
     const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l !== "");
     if (lines.length > 0) {
-        pollData.title = lines[0];
-        pollData.options = lines.slice(1);
-        pollData.options.forEach(o => { if(!pollData.votes[o]) pollData.votes[o] = 0; });
+        pollState.title = lines[0];
+        pollState.options = lines.slice(1);
+        pollState.options.forEach(o => { if(!pollState.votes[o]) pollState.votes[o] = 0; });
         render();
     }
 }
 
 async function vote(option) {
-    pollData.votes[option] = (pollData.votes[option] || 0) + 1;
+    // 票を増やして送信
+    pollState.votes[option] = (pollState.votes[option] || 0) + 1;
+    // 自分でも描画
     render();
-    OviceBridge.set(KEY, pollData.votes);
+    // oVice全体に送信 (これにより全員のonSyncが発火する)
+    OviceApp.update(SHARED_KEY, pollState.votes);
 }
 
 function render() {
-    document.getElementById('poll-title').innerText = pollData.title || "Poll";
+    document.getElementById('poll-title').innerText = pollState.title || "アンケート";
     const container = document.getElementById('options');
     container.innerHTML = '';
-    const total = Object.values(pollData.votes).reduce((a, b) => a + b, 0);
+    const total = Object.values(pollState.votes).reduce((a, b) => a + b, 0);
 
-    pollData.options.forEach(opt => {
-        const count = pollData.votes[opt] || 0;
+    pollState.options.forEach(opt => {
+        const count = pollState.votes[opt] || 0;
         const per = total === 0 ? 0 : (count / total) * 100;
         const btn = document.createElement('div');
         btn.className = 'option-btn';
@@ -132,7 +137,7 @@ function render() {
     });
 }
 
-start();
+main();
 </script>
 </body>
 </html>
