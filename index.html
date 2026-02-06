@@ -2,139 +2,132 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>oVice CSV Poll - Auto Load</title>
+    <title>oVice Shared CSV Poll</title>
     <style>
-        body { font-family: sans-serif; padding: 12px; background: #fff; margin: 0; color: #333; }
+        body { font-family: sans-serif; padding: 12px; background: #fff; margin: 0; }
         .poll-card { border: 1px solid #eee; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-        h3 { font-size: 18px; margin: 0 0 15px 0; border-left: 4px solid #0096ff; padding-left: 10px; cursor: help; }
+        h3 { font-size: 18px; margin: 0 0 15px 0; border-left: 4px solid #0096ff; padding-left: 10px; }
         .option-btn {
             display: block; width: 100%; padding: 12px; margin: 8px 0;
             background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px;
-            text-align: left; position: relative; overflow: hidden; font-size: 14px;
+            cursor: pointer; text-align: left; position: relative; overflow: hidden;
         }
-        .bar { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(0, 150, 255, 0.15); transition: width 0.5s ease-out; }
-        .label-text { position: relative; z-index: 1; }
-        .count { float: right; position: relative; z-index: 1; font-weight: bold; color: #0076cc; }
-        #admin-panel { margin-top: 20px; padding: 10px; border: 1px dashed #ccc; background: #fafafa; display: none; }
-        .status-msg { font-size: 10px; color: #999; margin-top: 8px; }
+        .bar { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(0, 150, 255, 0.15); transition: width 0.3s ease-out; }
+        .label-text { position: relative; z-index: 1; pointer-events: none; }
+        .count { float: right; position: relative; z-index: 1; font-weight: bold; color: #0076cc; pointer-events: none; }
+        .footer { font-size: 10px; color: #ccc; margin-top: 10px; text-align: right; }
     </style>
 </head>
 <body>
 
 <div class="poll-card">
-    <h3 id="poll-title" onclick="toggleAdmin()">読み込み中...</h3>
+    <h3 id="poll-title">Loading CSV...</h3>
     <div id="options"></div>
-    <div id="status" class="status-msg"></div>
-
-    <div id="admin-panel">
-        <span style="font-size:11px; font-weight:bold;">CSVを手動で上書き:</span><br>
-        <input type="file" id="csv-file" accept=".csv" style="font-size:11px;">
-    </div>
+    <div class="footer" id="sync-status">Syncing...</div>
 </div>
 
 <script>
-/** SDK内蔵通信ユニット */
-const OviceMiniSDK = (() => {
-    let _onC = null;
-    window.addEventListener('message', e => { if(e.data.type==='storage' && _onC) _onC(e.data.key, e.data.value); });
+/** * 超軽量・高確実性 SDK通信 
+ */
+const OviceSDK = (() => {
+    let _onUpdate = null;
+    window.addEventListener('message', e => {
+        if (!e.data) return;
+        // ストレージ変更通知の受信
+        if (e.data.type === 'storage' || e.data.event === 'storageChanged') {
+            if (_onUpdate) _onUpdate(e.data.key, e.data.value);
+        }
+    });
     return {
-        init: () => new Promise(res => { window.parent.postMessage({type:'init'}, '*'); res({
-            getStorage: k => new Promise(r => {
-                const h = e => { if(e.data.type==='get_storage' && e.data.key===k){ window.removeEventListener('message', h); r(e.data.value); }};
-                window.addEventListener('message', h); window.parent.postMessage({type:'get_storage', key:k}, '*');
-            }),
-            setStorage: (k, v) => window.parent.postMessage({type:'set_storage', key:k, value:v}, '*'),
-            onStorageChanged: cb => { _onC = cb; }
-        });})
+        init: () => {
+            window.parent.postMessage({ type: 'init' }, '*');
+            return Promise.resolve({
+                get: (k) => new Promise(r => {
+                    const h = e => { if(e.data.type === 'get_storage' && e.data.key === k) { window.removeEventListener('message', h); r(e.data.value); }};
+                    window.addEventListener('message', h);
+                    window.parent.postMessage({ type: 'get_storage', key: k }, '*');
+                }),
+                set: (k, v) => window.parent.postMessage({ type: 'set_storage', key: k, value: v }, '*'),
+                onChange: (cb) => { _onUpdate = cb; }
+            });
+        }
     };
 })();
 
 let ovice = null;
-let pollState = { title: "", options: [], votes: {} };
+let pollData = { title: "", options: [], votes: {} };
+const STORAGE_KEY = 'poll_v2_data';
 
 async function start() {
-    ovice = await OviceMiniSDK.init();
+    ovice = await OviceSDK.init();
+    
+    // 1. vote.csv を読み込む
+    await loadCsv();
 
-    // 1. まず同じフォルダの vote.csv を読みに行く
-    await loadInitialCSV();
-
-    // 2. 投票データの同期
-    const saved = await ovice.getStorage('poll_state_votes');
-    if (saved) {
-        pollState.votes = saved;
-        renderPoll();
+    // 2. 共有ストレージから現在の集計を取得
+    const remoteVotes = await ovice.get(STORAGE_KEY);
+    if (remoteVotes) {
+        pollData.votes = remoteVotes;
+        render();
     }
 
-    ovice.onStorageChanged((key, val) => {
-        if (key === 'poll_state_votes') {
-            pollState.votes = val;
-            renderPoll();
+    // 3. 他の人のクリックを監視
+    ovice.onChange((key, val) => {
+        if (key === STORAGE_KEY) {
+            pollData.votes = val;
+            render();
+            document.getElementById('sync-status').innerText = "Updated just now";
         }
     });
-
-    document.getElementById('csv-file').addEventListener('change', handleFileUpload);
 }
 
-// サーバー上の vote.csv を読み込む関数
-async function loadInitialCSV() {
+async function loadCsv() {
     try {
-        const res = await fetch('vote.csv?v=' + Date.now());
-        if (!res.ok) throw new Error("CSV file not found");
+        const res = await fetch('vote.csv?t=' + Date.now());
         const text = await res.text();
-        parseCSV(text);
-        document.getElementById('status').innerText = "Loaded: vote.csv";
+        const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l !== "");
+        if (lines.length > 0) {
+            pollData.title = lines[0];
+            pollData.options = lines.slice(1);
+            // 選択肢の器だけ用意
+            pollData.options.forEach(o => { if(!pollData.votes[o]) pollData.votes[o] = 0; });
+            render();
+        }
     } catch (e) {
-        document.getElementById('poll-title').innerText = "vote.csv が見つかりません";
-        console.error(e);
+        document.getElementById('poll-title').innerText = "vote.csv Load Error";
     }
-}
-
-function parseCSV(text) {
-    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l !== "");
-    if (lines.length > 0) {
-        pollState.title = lines[0];
-        pollState.options = lines.slice(1);
-        renderPoll();
-    }
-}
-
-function handleFileUpload(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = e => {
-        parseCSV(e.target.result);
-        document.getElementById('status').innerText = "Manual Upload Applied";
-    };
-    reader.readAsText(file);
 }
 
 async function vote(option) {
-    pollState.votes[option] = (pollState.votes[option] || 0) + 1;
-    await ovice.setStorage('poll_state_votes', pollState.votes);
-    renderPoll();
+    // 1. ローカルの数値を即座に増やす（体感速度向上）
+    pollData.votes[option] = (pollData.votes[option] || 0) + 1;
+    render();
+    
+    // 2. oViceの共有ストレージを更新（ここで全員に同期される）
+    if (ovice) {
+        await ovice.set(STORAGE_KEY, pollData.votes);
+    }
 }
 
-function renderPoll() {
-    document.getElementById('poll-title').innerText = pollState.title || "アンケート";
+function render() {
+    document.getElementById('poll-title').innerText = pollData.title || "Poll";
     const container = document.getElementById('options');
     container.innerHTML = '';
-    const total = Object.values(pollState.votes).reduce((a, b) => a + b, 0);
-    pollState.options.forEach(opt => {
-        const count = pollState.votes[opt] || 0;
+    const total = Object.values(pollData.votes).reduce((a, b) => a + b, 0);
+
+    pollData.options.forEach(opt => {
+        const count = pollData.votes[opt] || 0;
         const per = total === 0 ? 0 : (count / total) * 100;
-        const btn = document.createElement('div'); // buttonからdivに変更して挙動を安定化
+        const btn = document.createElement('div');
         btn.className = 'option-btn';
-        btn.style.cursor = 'pointer';
-        btn.innerHTML = `<div class="bar" style="width:${per}%"></div><span class="label-text">${opt}</span><span class="count">${count}</span>`;
+        btn.innerHTML = `
+            <div class="bar" style="width:${per}%"></div>
+            <span class="label-text">${opt}</span>
+            <span class="count">${count}</span>
+        `;
         btn.onclick = () => vote(opt);
         container.appendChild(btn);
     });
-}
-
-function toggleAdmin() {
-    const p = document.getElementById('admin-panel');
-    p.style.display = p.style.display === 'block' ? 'none' : 'block';
 }
 
 start();
