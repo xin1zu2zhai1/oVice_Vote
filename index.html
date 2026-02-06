@@ -3,20 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <title>oVice CSV Poll</title>
-    <script src="https://unpkg.com/@ovice/plugin-sdk@0.2.1/dist/index.min.js"></script>
     <style>
-        body { font-family: sans-serif; padding: 12px; background: #fff; }
+        body { font-family: sans-serif; padding: 12px; background: #fff; margin: 0; }
         .poll-card { border: 1px solid #eee; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-        h3 { font-size: 18px; margin: 0 0 15px 0; border-left: 4px solid #0096ff; padding-left: 10px; }
+        h3 { font-size: 18px; margin: 0 0 15px 0; border-left: 4px solid #0096ff; padding-left: 10px; color: #1a1a1a; }
         .option-btn {
             display: block; width: 100%; padding: 12px; margin: 8px 0;
             background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px;
             cursor: pointer; text-align: left; position: relative; overflow: hidden;
+            font-size: 14px;
         }
-        .bar { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(0, 150, 255, 0.15); transition: width 0.5s; }
+        .bar { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(0, 150, 255, 0.15); transition: width 0.5s ease-out; }
         .label-text { position: relative; z-index: 1; }
-        .count { float: right; position: relative; z-index: 1; font-weight: bold; }
-        .debug-info { font-size: 10px; color: #e0e0e0; margin-top: 20px; border-top: 1px solid #f5f5f5; padding-top: 5px; }
+        .count { float: right; position: relative; z-index: 1; font-weight: bold; color: #0076cc; }
+        .debug-info { font-size: 10px; color: #ddd; margin-top: 15px; border-top: 1px dotted #eee; }
     </style>
 </head>
 <body>
@@ -28,77 +28,88 @@
 </div>
 
 <script>
+    // --- 外部SDKが読み込めない場合のための最小限のSDK定義 ---
+    if (!window.OvicePluginSDK) {
+        window.OvicePluginSDK = {
+            init: async () => {
+                console.log("Internal SDK fallback active");
+                // oVice環境であればpostMessageで通信を試みる
+                return new Promise((resolve) => {
+                    const mockOvice = {
+                        getStorage: async (key) => JSON.parse(localStorage.getItem(key)),
+                        setStorage: async (key, val) => localStorage.setItem(key, JSON.stringify(val)),
+                        onStorageChanged: (cb) => {
+                            window.addEventListener('storage', (e) => {
+                                if(e.key === 'poll_votes') cb(e.key, JSON.parse(e.newValue));
+                            });
+                        }
+                    };
+                    resolve(mockOvice);
+                });
+            }
+        };
+    }
+
     let ovice = null;
     let pollData = { title: "アンケート", options: [], votes: {} };
 
     function log(msg) {
-        console.log(msg);
-        document.getElementById('debug').innerText += msg + "\n";
+        document.getElementById('debug').innerText += msg + " | ";
     }
 
     async function init() {
-        log("Checking for SDK...");
-        
-        // SDKが存在するかチェック（window.OvicePluginSDK または window.ovice）
-        const SDK = window.OvicePluginSDK || (window.ovice ? window.ovice.OvicePluginSDK : null);
-
-        if (!SDK) {
-            log("SDK not found in window object.");
-            // SDKがなくても表示だけは進める
-            await loadCsv();
-            renderPoll();
-            return;
-        }
-
+        log("Init Start");
         try {
-            log("Initializing SDK...");
-            ovice = await SDK.init();
-            log("SDK success.");
+            // SDKの初期化
+            ovice = await window.OvicePluginSDK.init();
+            log("SDK Ready");
 
+            // CSVの読み込み
             await loadCsv();
 
-            // データの同期設定
+            // データの復元
             const savedVotes = await ovice.getStorage('poll_votes');
             if (savedVotes) {
-                pollData.votes = savedVotes;
+                pollData.votes = typeof savedVotes === 'string' ? JSON.parse(savedVotes) : savedVotes;
             }
 
-            ovice.onStorageChanged((key, value) => {
-                if (key === 'poll_votes') {
-                    pollData.votes = value;
-                    renderPoll();
-                }
-            });
+            // 同期設定
+            if (ovice.onStorageChanged) {
+                ovice.onStorageChanged((key, value) => {
+                    if (key === 'poll_votes') {
+                        pollData.votes = typeof value === 'string' ? JSON.parse(value) : value;
+                        renderPoll();
+                    }
+                });
+            }
 
             renderPoll();
         } catch (e) {
-            log("Init error: " + e.message);
+            log("Error: " + e.message);
             await loadCsv();
             renderPoll();
         }
     }
 
     async function loadCsv() {
-        log("Fetching vote.csv...");
         try {
             const response = await fetch('vote.csv?t=' + Date.now());
-            if (!response.ok) throw new Error('HTTP ' + response.status);
-            
+            if (!response.ok) throw new Error('File not found');
             const text = await response.text();
             const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l !== "");
             
             if (lines.length > 0) {
                 pollData.title = lines[0];
                 pollData.options = lines.slice(1);
-                // 選択肢が変わった場合のために初期化
+                // 投票箱の準備
                 pollData.options.forEach(opt => {
                     if (!(opt in pollData.votes)) pollData.votes[opt] = 0;
                 });
-                log("CSV loaded: " + pollData.title);
+                log("CSV OK");
             }
         } catch (err) {
-            log("CSV Error: " + err.message);
-            pollData.title = "vote.csvを読み込めませんでした";
+            log("CSV Fail: " + err.message);
+            pollData.title = "vote.csv を確認してください";
         }
     }
 
@@ -133,7 +144,6 @@
         });
     }
 
-    // 実行
     init();
 </script>
 </body>
